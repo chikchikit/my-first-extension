@@ -108,11 +108,26 @@ export function activate(context: vscode.ExtensionContext) {
 
       // Просим подтверждение. Пока уведомление открыто,
       // сообщение можно править прямо в поле Source Control
-      const answer = await vscode.window.showInformationMessage(
-        'Сообщение записано в поле Source Control. Можно отредактировать его. Закоммитить?',
-        'Закоммитить',
-        'Отмена'
-      );
+            // Открываем вкладку Source Control, чтобы поле с сообщением было видно
+      await vscode.commands.executeCommand('workbench.view.scm');
+
+      // Спрашиваем, пока пользователь не выберет коммит или отмену
+      let answer: string | undefined;
+      let text = 'Сообщение записано в поле Source Control. Закоммитить?';
+      while (true) {
+        answer = await vscode.window.showInformationMessage(
+          text,
+          'Закоммитить',
+          'Редактировать',
+          'Отмена'
+        );
+        if (answer !== 'Редактировать') {
+          break;
+        }
+        // Переводим курсор в поле сообщения
+        await vscode.commands.executeCommand('workbench.scm.focus');
+        text = 'Отредактируйте сообщение в поле Source Control и нажмите «Закоммитить».';
+      }
       if (answer !== 'Закоммитить') {
         return;
       }
