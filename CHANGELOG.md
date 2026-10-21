@@ -1,9 +1,13 @@
 # Change Log
 
-All notable changes to the "my-first-extension" extension will be documented in this file.
+## [0.1.0]
 
-Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+- Определение добавленных, изменённых и удалённых функций по diff
+- Генерация сообщения коммита в формате Conventional Commits
+- Боковая панель с деревом изменений и чекбоксами
+- Выбор типа коммита, редактирование сообщения, коммит
+- Горячая клавиша Ctrl+Alt+G и кнопка в Source Control
 
-## [Unreleased]
+## [0.0.1]
 
-- Initial release
+- Шаблон расширения (Hello World)
