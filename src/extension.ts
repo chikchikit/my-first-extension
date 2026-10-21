@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import { parseDiff } from './diffParser';
+import { getFunctions, getFunctionsFromText, classify } from './symbolMapper';
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Расширение "my-first-extension" активировано');
 
-  // Вывод результатов в отдельную панель Output
   const output = vscode.window.createOutputChannel('Commit Assistant');
   context.subscriptions.push(output);
 
@@ -19,7 +19,6 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(disposable);
 
-  // Команда: читает изменённые файлы и строки через Git API
   const generate = vscode.commands.registerCommand(
     'my-first-extension.generateCommitMessage',
     async () => {
@@ -36,7 +35,6 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      // Файл может быть и в index, и в working tree, поэтому убираем дубли
       const changes = [
         ...repo.state.indexChanges,
         ...repo.state.workingTreeChanges,
@@ -50,19 +48,40 @@ export function activate(context: vscode.ExtensionContext) {
       output.appendLine(`Изменено файлов: ${paths.length}`);
 
       for (const path of paths) {
+        output.appendLine(`\n${path}`);
         try {
-          // diff файла относительно последнего коммита (HEAD)
           const diff: string = await repo.diffWithHEAD(path);
           if (!diff) {
-            output.appendLine(`\n${path}\n  diff пустой (возможно, новый неотслеживаемый файл)`);
+            output.appendLine('  diff пустой (возможно, новый неотслеживаемый файл)');
             continue;
           }
           const parsed = parseDiff(diff);
-          output.appendLine(`\n${path}`);
-          output.appendLine(`  добавлены строки: ${parsed.addedLines.join(', ') || '-'}`);
-          output.appendLine(`  удалены строки (в старом файле): ${parsed.removedLines.join(', ') || '-'}`);
+          const uri = vscode.Uri.file(path);
+
+          // Функции текущей версии файла
+          const newFuncs = await getFunctions(uri);
+
+          // Функции версии из HEAD: берём текст из git и разбираем его
+          let oldFuncs: Awaited<ReturnType<typeof getFunctions>> = [];
+          try {
+            const oldText: string = await repo.show('HEAD', path);
+            const languageId = (await vscode.workspace.openTextDocument(uri)).languageId;
+            oldFuncs = await getFunctionsFromText(oldText, languageId, path);
+          } catch {
+            oldFuncs = []; // файла нет в HEAD, значит, он новый
+          }
+
+          output.appendLine(
+            `  найдено функций: сейчас ${newFuncs.length}, в HEAD ${oldFuncs.length}`
+          );
+
+          const result = classify(oldFuncs, newFuncs, parsed);
+          output.appendLine(`  добавлены: ${result.added.join(', ') || '-'}`);
+          output.appendLine(`  изменены: ${result.modified.join(', ') || '-'}`);
+          output.appendLine(`  удалены: ${result.removed.join(', ') || '-'}`);
+          output.appendLine(`  изменённых строк вне функций: ${result.outside}`);
         } catch (e) {
-          output.appendLine(`\n${path}\n  ошибка получения diff: ${e}`);
+          output.appendLine(`  ошибка: ${e}`);
         }
       }
     }
