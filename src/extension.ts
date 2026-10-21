@@ -1,6 +1,50 @@
 import * as vscode from 'vscode';
 import { parseDiff } from './diffParser';
-import { getFunctions, getFunctionsFromText, classify } from './symbolMapper';
+import {
+  FuncInfo,
+  getFunctions,
+  getFunctionsFromText,
+  classify,
+} from './symbolMapper';
+import { FileResult, buildMessage } from './messageBuilder';
+
+// Анализ одного файла: diff + функции сейчас + функции в HEAD
+async function analyzeFile(repo: any, path: string): Promise<FileResult> {
+  const uri = vscode.Uri.file(path);
+
+  let diff = '';
+  try {
+    diff = await repo.diffWithHEAD(path);
+  } catch {
+    diff = ''; // например, новый неотслеживаемый файл
+  }
+  const parsed = parseDiff(diff);
+
+  let newFuncs: FuncInfo[] = [];
+  try {
+    newFuncs = await getFunctions(uri);
+  } catch {
+    newFuncs = [];
+  }
+
+  let oldFuncs: FuncInfo[] = [];
+  try {
+    const oldText: string = await repo.show('HEAD', path);
+    const languageId = (await vscode.workspace.openTextDocument(uri)).languageId;
+    oldFuncs = await getFunctionsFromText(oldText, languageId, path);
+  } catch {
+    oldFuncs = []; // файла нет в HEAD, значит, он новый
+  }
+
+  const result = classify(oldFuncs, newFuncs, parsed);
+  return {
+    path: vscode.workspace.asRelativePath(uri, false),
+    added: result.added,
+    modified: result.modified,
+    removed: result.removed,
+    outside: result.outside,
+  };
+}
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Расширение "my-first-extension" активировано');
@@ -35,54 +79,57 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      const changes = [
-        ...repo.state.indexChanges,
-        ...repo.state.workingTreeChanges,
-      ];
+      // Если что-то добавлено через git add, берём только это,
+      // иначе все изменения (как и при коммите ниже)
+      const staged = repo.state.indexChanges;
+      const source = staged.length > 0 ? staged : repo.state.workingTreeChanges;
       const paths: string[] = [
-        ...new Set<string>(changes.map((c: { uri: vscode.Uri }) => c.uri.fsPath)),
+        ...new Set<string>(source.map((c: { uri: vscode.Uri }) => c.uri.fsPath)),
       ];
+
+      if (paths.length === 0) {
+        vscode.window.showInformationMessage('Нет изменений для коммита');
+        return;
+      }
+
+      // Анализируем все файлы
+      const results: FileResult[] = [];
+      for (const path of paths) {
+        results.push(await analyzeFile(repo, path));
+      }
+
+      // Собираем сообщение и кладём в поле Source Control
+      const message = buildMessage(results);
+      repo.inputBox.value = message;
 
       output.clear();
-      output.show(true);
-      output.appendLine(`Изменено файлов: ${paths.length}`);
+      output.appendLine('Сформировано сообщение:\n');
+      output.appendLine(message);
 
-      for (const path of paths) {
-        output.appendLine(`\n${path}`);
-        try {
-          const diff: string = await repo.diffWithHEAD(path);
-          if (!diff) {
-            output.appendLine('  diff пустой (возможно, новый неотслеживаемый файл)');
-            continue;
-          }
-          const parsed = parseDiff(diff);
-          const uri = vscode.Uri.file(path);
+      // Просим подтверждение. Пока уведомление открыто,
+      // сообщение можно править прямо в поле Source Control
+      const answer = await vscode.window.showInformationMessage(
+        'Сообщение записано в поле Source Control. Можно отредактировать его. Закоммитить?',
+        'Закоммитить',
+        'Отмена'
+      );
+      if (answer !== 'Закоммитить') {
+        return;
+      }
 
-          // Функции текущей версии файла
-          const newFuncs = await getFunctions(uri);
-
-          // Функции версии из HEAD: берём текст из git и разбираем его
-          let oldFuncs: Awaited<ReturnType<typeof getFunctions>> = [];
-          try {
-            const oldText: string = await repo.show('HEAD', path);
-            const languageId = (await vscode.workspace.openTextDocument(uri)).languageId;
-            oldFuncs = await getFunctionsFromText(oldText, languageId, path);
-          } catch {
-            oldFuncs = []; // файла нет в HEAD, значит, он новый
-          }
-
-          output.appendLine(
-            `  найдено функций: сейчас ${newFuncs.length}, в HEAD ${oldFuncs.length}`
-          );
-
-          const result = classify(oldFuncs, newFuncs, parsed);
-          output.appendLine(`  добавлены: ${result.added.join(', ') || '-'}`);
-          output.appendLine(`  изменены: ${result.modified.join(', ') || '-'}`);
-          output.appendLine(`  удалены: ${result.removed.join(', ') || '-'}`);
-          output.appendLine(`  изменённых строк вне функций: ${result.outside}`);
-        } catch (e) {
-          output.appendLine(`  ошибка: ${e}`);
-        }
+      // Берём текст из поля, а не исходный, чтобы учесть правки
+      const finalMessage: string = repo.inputBox.value.trim();
+      if (!finalMessage) {
+        vscode.window.showErrorMessage('Сообщение коммита пустое');
+        return;
+      }
+      try {
+        // Если ничего не добавлено через git add, коммитим все изменения
+        await repo.commit(finalMessage, { all: staged.length === 0 });
+        repo.inputBox.value = '';
+        vscode.window.showInformationMessage('Коммит создан');
+      } catch (e) {
+        vscode.window.showErrorMessage(`Не удалось создать коммит: ${e}`);
       }
     }
   );
