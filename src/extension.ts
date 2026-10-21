@@ -1,10 +1,14 @@
 import * as vscode from 'vscode';
+import { parseDiff } from './diffParser';
 
-// Вызывается при активации расширения
 export function activate(context: vscode.ExtensionContext) {
   console.log('Расширение "my-first-extension" активировано');
 
-  // Команда Hello World
+  // Вывод результатов в отдельную панель Output
+  const output = vscode.window.createOutputChannel('Commit Assistant');
+  context.subscriptions.push(output);
+
+  // Команда Hello World (из методички)
   const disposable = vscode.commands.registerCommand(
     'my-first-extension.helloWorld',
     () => {
@@ -15,7 +19,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(disposable);
 
-  // Новая команда: читает изменённые файлы через Git API
+  // Команда: читает изменённые файлы и строки через Git API
   const generate = vscode.commands.registerCommand(
     'my-first-extension.generateCommitMessage',
     async () => {
@@ -32,19 +36,40 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
+      // Файл может быть и в index, и в working tree, поэтому убираем дубли
       const changes = [
         ...repo.state.indexChanges,
         ...repo.state.workingTreeChanges,
       ];
-      const files = changes.map((c: any) => c.uri.fsPath);
-      console.log(files);
-      vscode.window.showInformationMessage(`Изменено файлов: ${files.length}`);
+      const paths: string[] = [
+        ...new Set<string>(changes.map((c: { uri: vscode.Uri }) => c.uri.fsPath)),
+      ];
+
+      output.clear();
+      output.show(true);
+      output.appendLine(`Изменено файлов: ${paths.length}`);
+
+      for (const path of paths) {
+        try {
+          // diff файла относительно последнего коммита (HEAD)
+          const diff: string = await repo.diffWithHEAD(path);
+          if (!diff) {
+            output.appendLine(`\n${path}\n  diff пустой (возможно, новый неотслеживаемый файл)`);
+            continue;
+          }
+          const parsed = parseDiff(diff);
+          output.appendLine(`\n${path}`);
+          output.appendLine(`  добавлены строки: ${parsed.addedLines.join(', ') || '-'}`);
+          output.appendLine(`  удалены строки (в старом файле): ${parsed.removedLines.join(', ') || '-'}`);
+        } catch (e) {
+          output.appendLine(`\n${path}\n  ошибка получения diff: ${e}`);
+        }
+      }
     }
   );
   context.subscriptions.push(generate);
 }
 
-// Вызывается при деактивации расширения
 export function deactivate() {
   console.log('Расширение "my-first-extension" деактивировано');
 }
