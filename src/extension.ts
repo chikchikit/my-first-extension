@@ -1,49 +1,93 @@
 import * as vscode from 'vscode';
-import { parseDiff } from './diffParser';
-import {
-  FuncInfo,
-  getFunctions,
-  getFunctionsFromText,
-  classify,
-} from './symbolMapper';
-import { FileResult, buildMessage } from './messageBuilder';
+import { FileResult, buildMessage, detectType } from './messageBuilder';
+import { getRepo, getChangedPaths, analyzeFile } from './analysis';
+import { ChangesTree, Node } from './changesTree';
 
-// Анализ одного файла: diff + функции сейчас + функции в HEAD
-async function analyzeFile(repo: any, path: string): Promise<FileResult> {
-  const uri = vscode.Uri.file(path);
-
-  let diff = '';
-  try {
-    diff = await repo.diffWithHEAD(path);
-  } catch {
-    diff = ''; // например, новый неотслеживаемый файл
+// Заново анализируем изменения и заполняем дерево
+async function refreshTree(repo: any, tree: ChangesTree): Promise<void> {
+  const results: FileResult[] = [];
+  for (const path of getChangedPaths(repo)) {
+    results.push(await analyzeFile(repo, path));
   }
-  const parsed = parseDiff(diff);
+  tree.setResults(results);
+}
 
-  let newFuncs: FuncInfo[] = [];
-  try {
-    newFuncs = await getFunctions(uri);
-  } catch {
-    newFuncs = [];
-  }
+// Обновляем сообщение в поле Source Control по отмеченным галочкам
+function updatePreview(repo: any, tree: ChangesTree): void {
+  const selected = tree.getSelected();
+  repo.inputBox.value = selected.length > 0 ? buildMessage(selected) : '';
+}
 
-  let oldFuncs: FuncInfo[] = [];
-  try {
-    const oldText: string = await repo.show('HEAD', path);
-    const languageId = (await vscode.workspace.openTextDocument(uri)).languageId;
-    oldFuncs = await getFunctionsFromText(oldText, languageId, path);
-  } catch {
-    oldFuncs = []; // файла нет в HEAD, значит, он новый
+// Выбор типа, редактирование и коммит по отмеченным элементам дерева
+async function runCommitFlow(
+  repo: any,
+  tree: ChangesTree,
+  output: vscode.OutputChannel
+): Promise<void> {
+  const selected = tree.getSelected();
+  if (selected.length === 0) {
+    vscode.window.showInformationMessage('Нет выбранных изменений для коммита');
+    return;
   }
 
-  const result = classify(oldFuncs, newFuncs, parsed);
-  return {
-    path: vscode.workspace.asRelativePath(uri, false),
-    added: result.added,
-    modified: result.modified,
-    removed: result.removed,
-    outside: result.outside,
-  };
+  // Предлагаем тип по эвристике, но выбор остаётся за пользователем
+  const suggested = detectType(selected);
+  const allTypes = ['feat', 'fix', 'refactor', 'docs', 'test', 'style', 'perf', 'chore'];
+  const ordered = [suggested, ...allTypes.filter((t) => t !== suggested)];
+  const picked = await vscode.window.showQuickPick(
+    ordered.map((t) => ({
+      label: t,
+      description: t === suggested ? 'предложено автоматически' : undefined,
+    })),
+    { placeHolder: 'Выберите тип коммита' }
+  );
+  if (!picked) {
+    return;
+  }
+
+  const message = buildMessage(selected, picked.label);
+  repo.inputBox.value = message;
+
+  output.clear();
+  output.appendLine('Сформировано сообщение:\n');
+  output.appendLine(message);
+
+  await vscode.commands.executeCommand('workbench.view.scm');
+
+  let answer: string | undefined;
+  let text = 'Сообщение записано в поле Source Control. Закоммитить?';
+  while (true) {
+    answer = await vscode.window.showInformationMessage(
+      text,
+      'Закоммитить',
+      'Редактировать',
+      'Отмена'
+    );
+    if (answer !== 'Редактировать') {
+      break;
+    }
+    await vscode.commands.executeCommand('workbench.scm.focus');
+    text = 'Отредактируйте сообщение в поле Source Control и нажмите «Закоммитить».';
+  }
+  if (answer !== 'Закоммитить') {
+    return;
+  }
+
+  // Берём текст из поля, чтобы учесть ручные правки
+  const finalMessage: string = repo.inputBox.value.trim();
+  if (!finalMessage) {
+    vscode.window.showErrorMessage('Сообщение коммита пустое');
+    return;
+  }
+  try {
+    // Если ничего не добавлено через git add, коммитим все изменения
+    await repo.commit(finalMessage, { all: repo.state.indexChanges.length === 0 });
+    repo.inputBox.value = '';
+    await refreshTree(repo, tree);
+    vscode.window.showInformationMessage('Коммит создан');
+  } catch (e) {
+    vscode.window.showErrorMessage(`Не удалось создать коммит: ${e}`);
+  }
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -52,103 +96,67 @@ export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel('Commit Assistant');
   context.subscriptions.push(output);
 
+  // Дерево изменений в боковой панели
+  const tree = new ChangesTree();
+  const view = vscode.window.createTreeView('commitAssistant.changes', {
+    treeDataProvider: tree,
+    showCollapseAll: true,
+  });
+  context.subscriptions.push(view);
+
+  // Поставили или сняли галочку: обновляем модель и сообщение
+  view.onDidChangeCheckboxState(async (e) => {
+    for (const [node, state] of e.items as readonly [Node, vscode.TreeItemCheckboxState][]) {
+      tree.toggle(node, state === vscode.TreeItemCheckboxState.Checked);
+    }
+    const repo = await getRepo(true);
+    if (repo) { updatePreview(repo, tree); }
+  });
+
+  // Когда панель открыли, подтягиваем актуальные изменения
+  view.onDidChangeVisibility(async (e) => {
+    if (e.visible) {
+      const repo = await getRepo(true);
+      if (repo) { await refreshTree(repo, tree); }
+    }
+  });
+
   // Команда Hello World (из методички)
-  const disposable = vscode.commands.registerCommand(
-    'my-first-extension.helloWorld',
-    () => {
-      vscode.window.showInformationMessage(
-        'Привет из моего первого расширения!'
-      );
-    }
+  context.subscriptions.push(
+    vscode.commands.registerCommand('my-first-extension.helloWorld', () => {
+      vscode.window.showInformationMessage('Привет из моего первого расширения!');
+    })
   );
-  context.subscriptions.push(disposable);
 
-  const generate = vscode.commands.registerCommand(
-    'my-first-extension.generateCommitMessage',
-    async () => {
-      const gitExt = vscode.extensions.getExtension('vscode.git');
-      if (!gitExt) {
-        vscode.window.showErrorMessage('Git-расширение не найдено');
-        return;
-      }
-      const git = gitExt.isActive ? gitExt.exports : await gitExt.activate();
-      const api = git.getAPI(1);
-      const repo = api.repositories[0];
-      if (!repo) {
-        vscode.window.showErrorMessage('Откройте папку с git-репозиторием');
-        return;
-      }
-
-      // Если что-то добавлено через git add, берём только это,
-      // иначе все изменения (как и при коммите ниже)
-      const staged = repo.state.indexChanges;
-      const source = staged.length > 0 ? staged : repo.state.workingTreeChanges;
-      const paths: string[] = [
-        ...new Set<string>(source.map((c: { uri: vscode.Uri }) => c.uri.fsPath)),
-      ];
-
-      if (paths.length === 0) {
-        vscode.window.showInformationMessage('Нет изменений для коммита');
-        return;
-      }
-
-      // Анализируем все файлы
-      const results: FileResult[] = [];
-      for (const path of paths) {
-        results.push(await analyzeFile(repo, path));
-      }
-
-      // Собираем сообщение и кладём в поле Source Control
-      const message = buildMessage(results);
-      repo.inputBox.value = message;
-
-      output.clear();
-      output.appendLine('Сформировано сообщение:\n');
-      output.appendLine(message);
-
-      // Просим подтверждение. Пока уведомление открыто,
-      // сообщение можно править прямо в поле Source Control
-            // Открываем вкладку Source Control, чтобы поле с сообщением было видно
-      await vscode.commands.executeCommand('workbench.view.scm');
-
-      // Спрашиваем, пока пользователь не выберет коммит или отмену
-      let answer: string | undefined;
-      let text = 'Сообщение записано в поле Source Control. Закоммитить?';
-      while (true) {
-        answer = await vscode.window.showInformationMessage(
-          text,
-          'Закоммитить',
-          'Редактировать',
-          'Отмена'
-        );
-        if (answer !== 'Редактировать') {
-          break;
-        }
-        // Переводим курсор в поле сообщения
-        await vscode.commands.executeCommand('workbench.scm.focus');
-        text = 'Отредактируйте сообщение в поле Source Control и нажмите «Закоммитить».';
-      }
-      if (answer !== 'Закоммитить') {
-        return;
-      }
-
-      // Берём текст из поля, а не исходный, чтобы учесть правки
-      const finalMessage: string = repo.inputBox.value.trim();
-      if (!finalMessage) {
-        vscode.window.showErrorMessage('Сообщение коммита пустое');
-        return;
-      }
-      try {
-        // Если ничего не добавлено через git add, коммитим все изменения
-        await repo.commit(finalMessage, { all: staged.length === 0 });
-        repo.inputBox.value = '';
-        vscode.window.showInformationMessage('Коммит создан');
-      } catch (e) {
-        vscode.window.showErrorMessage(`Не удалось создать коммит: ${e}`);
-      }
-    }
+  // Главная команда (горячая клавиша и кнопка в Source Control):
+  // анализирует всё заново и сразу запускает сценарий коммита
+  context.subscriptions.push(
+    vscode.commands.registerCommand('my-first-extension.generateCommitMessage', async () => {
+      const repo = await getRepo();
+      if (!repo) { return; }
+      await refreshTree(repo, tree);
+      await runCommitFlow(repo, tree, output);
+    })
   );
-  context.subscriptions.push(generate);
+
+  // Кнопка «обновить» в панели
+  context.subscriptions.push(
+    vscode.commands.registerCommand('my-first-extension.refreshChanges', async () => {
+      const repo = await getRepo();
+      if (!repo) { return; }
+      await refreshTree(repo, tree);
+      updatePreview(repo, tree);
+    })
+  );
+
+  // Кнопка «закоммитить» в панели: использует текущие галочки
+  context.subscriptions.push(
+    vscode.commands.registerCommand('my-first-extension.commitSelected', async () => {
+      const repo = await getRepo();
+      if (!repo) { return; }
+      await runCommitFlow(repo, tree, output);
+    })
+  );
 }
 
 export function deactivate() {

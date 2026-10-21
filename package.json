@@ -27,6 +27,18 @@
       "title": "Generate Commit Message",
       "category": "Commit Assistant",
       "icon": "$(sparkle)"
+    },
+    {
+      "command": "my-first-extension.refreshChanges",
+      "title": "Refresh Changes",
+      "category": "Commit Assistant",
+      "icon": "$(refresh)"
+    },
+    {
+      "command": "my-first-extension.commitSelected",
+      "title": "Commit Selected",
+      "category": "Commit Assistant",
+      "icon": "$(check)"
     }
   ],
   "keybindings": [
@@ -36,12 +48,47 @@
       "mac": "cmd+alt+g"
     }
   ],
+  "viewsContainers": {
+    "activitybar": [
+      {
+        "id": "commitAssistant",
+        "title": "Commit Assistant",
+        "icon": "$(sparkle)"
+      }
+    ]
+  },
+  "views": {
+    "commitAssistant": [
+      {
+        "id": "commitAssistant.changes",
+        "name": "Изменения"
+      }
+    ]
+  },
+  "viewsWelcome": [
+    {
+      "view": "commitAssistant.changes",
+      "contents": "Изменений не найдено. Измените файл в git-репозитории и нажмите кнопку.\n[Обновить](command:my-first-extension.refreshChanges)"
+    }
+  ],
   "menus": {
     "scm/title": [
       {
         "command": "my-first-extension.generateCommitMessage",
         "when": "scmProvider == git",
         "group": "navigation"
+      }
+    ],
+    "view/title": [
+      {
+        "command": "my-first-extension.refreshChanges",
+        "when": "view == commitAssistant.changes",
+        "group": "navigation@1"
+      },
+      {
+        "command": "my-first-extension.commitSelected",
+        "when": "view == commitAssistant.changes",
+        "group": "navigation@2"
       }
     ]
   }

@@ -8,7 +8,7 @@ export interface FileResult {
 }
 
 // Определяем тип коммита по эвристике
-function detectType(results: FileResult[]): string {
+export function detectType(results: FileResult[]): string {
   const isDoc = (p: string) => /\.(md|txt|rst)$/i.test(p) || p.startsWith('docs/');
   const isTest = (p: string) =>
     /(^|\/)(test|tests|__tests__)\//i.test(p) ||
@@ -48,7 +48,9 @@ function buildBody(results: FileResult[]): string {
   return blocks.join('\n\n');
 }
 
-export function buildMessage(results: FileResult[]): string {
-  const type = detectType(results);
+export function buildMessage(
+  results: FileResult[],
+  type: string = detectType(results)
+): string {
   return `${buildTitle(results, type)}\n\n${buildBody(results)}`;
 }
